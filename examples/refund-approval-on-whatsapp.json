@@ -61,7 +61,7 @@
         "resource": "approval",
         "operation": "request",
         "title": "=Refund {{ ($json.body.amount / 100).toFixed(2) }} {{ $json.body.currency.toUpperCase() }} to {{ $json.body.customer_email }}",
-        "body": "=Reason given: {{ $json.body.reason }}\nPayment: {{ $json.body.payment_intent }}\n\nApprove and the refund goes out now. Skip and nothing happens.",
+        "body": "={{ \"Reason given: \" + $json.body.reason + \"\\n\" + \"Payment: \" + $json.body.payment_intent + \"\\n\\n\" + \"Approve and the refund goes out now. Skip and nothing happens.\" }}",
         "options": ["approve", "skip"],
         "wait": true,
         "waitTimeout": 900,
