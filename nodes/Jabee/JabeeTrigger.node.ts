@@ -1,5 +1,6 @@
 import type {
 	IDataObject,
+	IHookFunctions,
 	INodeType,
 	INodeTypeDescription,
 	IWebhookFunctions,
@@ -7,17 +8,11 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
+import { jabeeApiRequest } from './GenericFunctions';
 import { DEFAULT_TOLERANCE_SECONDS, verifySignature } from './signature';
 
 /**
  * The other direction: Jabee calling n8n.
- *
- * Jabee's webhook address is one setting on the account, not something a
- * single execution hands out, so this trigger cannot register itself the
- * way a Stripe or GitHub trigger does -- there is no API for it, by
- * design: the address and its signing secret are set by a person who is
- * signed in, on the Approvals page. You paste the Production URL below
- * into that field once, and every account event arrives here.
  *
  * Which makes this the right node for an approval that takes hours. The
  * Jabee node's "Wait for the Answer" holds an execution open while it
@@ -28,23 +23,17 @@ import { DEFAULT_TOLERANCE_SECONDS, verifySignature } from './signature';
  * anywhere else: words a verified handset typed on the WhatsApp thread,
  * delivered to this workflow. A reply from a phone can therefore be an
  * instruction, on a number nobody had to buy.
- */
-/**
- * No `webhookMethods`, and it is not an omission.
  *
- * `checkExists`, `create` and `delete` need an API that registers a
- * webhook address. Jabee has none: the address and its signing secret are
- * set on the Approvals page by a person who is signed in, deliberately --
- * a `jak_` key that could repoint where answers are delivered would make
- * a leaked key worth far more than the messages it can send. So this
- * trigger is registered by hand, the way n8n's own Webhook node is, and
- * the notice in the panel says where to paste the URL.
- *
- * The rule is suppressed rather than satisfied because satisfying it
- * would mean inventing an endpoint. If Jabee ever gains a key-authenticated
- * route for the webhook address, delete this and implement the three.
+ * **One address per account, and this node registers it.** Jabee posts
+ * every event for the whole business to one address, which is why
+ * `create` refuses to replace somebody else's rather than quietly taking
+ * the deliveries: see `webhookMethods` below. Activating this workflow
+ * also replaces the account's signing secret -- Jabee rotates it on every
+ * address change, so a repointed webhook can never be a silent one -- and
+ * the new secret is kept in this node's static data, which is why the
+ * credential's Webhook Signing Secret is optional now and only needed
+ * when the address was set by hand on the dashboard instead.
  */
-// eslint-disable-next-line @n8n/community-nodes/webhook-lifecycle-complete
 export class JabeeTrigger implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Jabee Trigger',
@@ -87,17 +76,17 @@ export class JabeeTrigger implements INodeType {
 			header: 'Waiting for Jabee',
 			executionsHelp: {
 				active:
-					'Jabee posts every event for the whole account to one address. Paste the Production URL above into the Jabee dashboard under Management then Approvals, as the webhook address, and copy the whsec_ secret it shows into the Webhook Signing Secret field on this node’s credential.',
+					'This workflow is registered as the account’s webhook address, and every event for the whole business arrives here. Jabee replaced the signing secret when it registered, so anything that was listening on the old address has stopped verifying.',
 				inactive:
-					'Jabee posts every event for the whole account to one address. Activate this workflow, then paste the Production URL above into the Jabee dashboard under Management then Approvals, as the webhook address, and copy the whsec_ secret it shows into the Webhook Signing Secret field on this node’s credential.',
+					'Activating this workflow registers it as the account’s webhook address and replaces the signing secret. Jabee allows one address per account, so activation is refused if a different one is already set — remove it under Management then Approvals first.',
 			},
 			activationHint:
-				'Deliveries are only accepted once the signing secret is on the credential, so set it before testing.',
+				'Activating registers this URL with Jabee and messages the verified handset to say the address changed.',
 		},
 		properties: [
 			{
 				displayName:
-					'Jabee sends every event for the account to one address, so paste the URL above into Management then Approvals in the Jabee dashboard. This node cannot register itself.',
+					'Activating this workflow registers it as the account’s one webhook address and replaces the signing secret, and the verified handset is messaged to say so. If the address was set by hand on the Approvals page instead, put that whsec_ secret on the credential.',
 				name: 'setupNotice',
 				type: 'notice',
 				default: '',
@@ -167,37 +156,150 @@ export class JabeeTrigger implements INodeType {
 		],
 	};
 
+	/**
+	 * Registering this URL with Jabee, over the same `/api/v1` the rest of
+	 * the package uses (`GET`, `PUT` and `DELETE /webhook`).
+	 *
+	 * Three things about this are not the usual shape, and all three come
+	 * from Jabee having **one webhook address per account** rather than one
+	 * per subscription:
+	 *
+	 *  - `create` **refuses to replace a different address**. n8n's
+	 *    lifecycle would happily overwrite it, and overwriting it would
+	 *    silently stop the deliveries whatever was there is relying on --
+	 *    another workflow, or a server set up on the dashboard. A failed
+	 *    activation with a sentence saying what to remove is the lesser
+	 *    harm by a long way.
+	 *  - `delete` **only removes the address when it is this URL**, for the
+	 *    same reason in reverse: deactivating a workflow must not take down
+	 *    an endpoint it never registered.
+	 *  - `create` keeps the signing secret Jabee hands back in this node's
+	 *    static data. Jabee rotates the secret on every address change --
+	 *    which is what makes a repointed webhook impossible to do quietly
+	 *    -- so the secret that was on the credential a moment ago is no
+	 *    longer the live one. There is no route that reads a secret back,
+	 *    by design, so the one chance to keep it is here.
+	 */
+	webhookMethods = {
+		default: {
+			/**
+			 * True only when Jabee is already pointed here *and* we hold a
+			 * secret to verify with. Without the second half, activation
+			 * would look complete and every delivery would be refused 401.
+			 */
+			async checkExists(this: IHookFunctions): Promise<boolean> {
+				const mine = this.getNodeWebhookUrl('default');
+				if (!mine) return false;
+				const current = await readAddress.call(this);
+				if (current !== mine) return false;
+				return await haveSecret.call(this);
+			},
+
+			async create(this: IHookFunctions): Promise<boolean> {
+				const mine = this.getNodeWebhookUrl('default');
+				if (!mine) {
+					throw new NodeOperationError(this.getNode(), 'This trigger has no webhook URL yet', {
+						description: 'Save the workflow and activate it again.',
+					});
+				}
+
+				const current = await readAddress.call(this);
+				if (current && current !== mine) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Jabee already posts to ${hostOf(current)}`,
+						{
+							description:
+								'A Jabee account has one webhook address and this would take it over, so nothing was changed. Remove the address under Management then Approvals in the Jabee dashboard — or send DELETE /api/v1/webhook with the same key — and activate this workflow again. If that address was this workflow on a previous URL, remove it the same way.',
+						},
+					);
+				}
+
+				const answer = await jabeeApiRequest.call(this, 'PUT', '/webhook', { url: mine });
+				const secret = typeof answer.secret === 'string' ? answer.secret : '';
+				const stored = this.getWorkflowStaticData('node');
+				if (secret) stored.webhookSecret = secret;
+				else delete stored.webhookSecret;
+				return true;
+			},
+
+			async delete(this: IHookFunctions): Promise<boolean> {
+				const mine = this.getNodeWebhookUrl('default');
+				const stored = this.getWorkflowStaticData('node');
+				const current = await readAddress.call(this);
+
+				/**
+				 * Not ours, or already gone. Answered true either way:
+				 * n8n reads false as a failed deactivation, and there is
+				 * nothing here for anybody to retry.
+				 */
+				if (!current || current !== mine) {
+					if (current) {
+						this.logger.warn(
+							`Jabee Trigger left the webhook address alone: it points at ${hostOf(current)}, not at this workflow`,
+						);
+					}
+					delete stored.webhookSecret;
+					return true;
+				}
+
+				await jabeeApiRequest.call(this, 'DELETE', '/webhook');
+				delete stored.webhookSecret;
+				return true;
+			},
+		},
+	};
+
 	async webhook(this: IWebhookFunctions): Promise<IWebhookResponseData> {
 		const credentials = await this.getCredentials('jabeeApi');
-		const secret = String(credentials.webhookSecret ?? '');
 		const options = this.getNodeParameter('options', {}) as IDataObject;
 		const events = this.getNodeParameter('events', []) as string[];
+
+		/**
+		 * Two secrets can both be legitimate, so both are tried.
+		 *
+		 * The one this node was handed when it registered the address is
+		 * the live one in the ordinary case. The one pasted on the
+		 * credential is the live one when the address was set by hand on
+		 * the dashboard. Which of the two applies is not knowable from
+		 * here -- a change on either side rotates or does not -- and
+		 * trying the second after the first fails costs one HMAC of a
+		 * body we have already read.
+		 */
+		const registered = this.getWorkflowStaticData('node').webhookSecret;
+		const secrets = [
+			typeof registered === 'string' ? registered : '',
+			String(credentials.webhookSecret ?? ''),
+		].filter((one) => one.length > 0);
 
 		/**
 		 * A misconfiguration rather than a bad request, so it is said as
 		 * one. Refusing everything with a 401 would have looked like Jabee
 		 * being wrong, and the fix is on the credential.
 		 */
-		if (!secret) {
+		if (secrets.length === 0) {
 			throw new NodeOperationError(
 				this.getNode(),
 				'Add the webhook signing secret to the Jabee credential',
 				{
 					description:
-						'It begins whsec_ and is shown beside the webhook address in the Jabee dashboard under Management then Approvals. Without it a delivery cannot be told apart from anybody who found this URL.',
+						'Activating this workflow normally registers the address and keeps the secret itself. Set it by hand only when the address was set on the Approvals page instead: it begins whsec_ and is shown beside the address there. Without it a delivery cannot be told apart from anybody who found this URL.',
 				},
 			);
 		}
 
 		const request = this.getRequestObject();
 		const headers = this.getHeaderData();
-		const check = verifySignature({
-			header: singleHeader(headers['x-jabee-signature']),
-			rawBody: request.rawBody ?? '',
-			secret,
-			nowSeconds: Math.floor(Date.now() / 1000),
-			...(typeof options.tolerance === 'number' ? { toleranceSeconds: options.tolerance } : {}),
-		});
+		const checks = secrets.map((secret) =>
+			verifySignature({
+				header: singleHeader(headers['x-jabee-signature']),
+				rawBody: request.rawBody ?? '',
+				secret,
+				nowSeconds: Math.floor(Date.now() / 1000),
+				...(typeof options.tolerance === 'number' ? { toleranceSeconds: options.tolerance } : {}),
+			}),
+		);
+		const check = checks.find((one) => one.ok) ?? checks[0]!;
 
 		if (!check.ok) {
 			/**
@@ -241,4 +343,34 @@ export class JabeeTrigger implements INodeType {
 /** A header as one value, since Node hands repeated headers over as a list. */
 function singleHeader(value: string | string[] | undefined): string | undefined {
 	return Array.isArray(value) ? value[0] : value;
+}
+
+/** Where Jabee posts for this account, or null when it posts nowhere. */
+async function readAddress(this: IHookFunctions): Promise<string | null> {
+	const answer = await jabeeApiRequest.call(this, 'GET', '/webhook');
+	const webhook = (answer.webhook ?? {}) as IDataObject;
+	return typeof webhook.url === 'string' && webhook.url.length > 0 ? webhook.url : null;
+}
+
+/** Whether a delivery could be verified at all, from either place one is kept. */
+async function haveSecret(this: IHookFunctions): Promise<boolean> {
+	const registered = this.getWorkflowStaticData('node').webhookSecret;
+	if (typeof registered === 'string' && registered.length > 0) return true;
+	const credentials = await this.getCredentials('jabeeApi');
+	return String(credentials.webhookSecret ?? '').length > 0;
+}
+
+/**
+ * The host of an address, for a message about it.
+ *
+ * The path is often the whole of what makes a webhook URL secret, and
+ * this one goes into an n8n error that anybody who can open the workflow
+ * can read.
+ */
+function hostOf(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		return 'another address';
+	}
 }

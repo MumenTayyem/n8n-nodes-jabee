@@ -9,12 +9,14 @@ import type {
 /**
  * One credential for both nodes.
  *
- * The key signs every call the Jabee node makes. The signing secret is
- * only read by the Jabee Trigger node, which makes no calls at all -- it
- * verifies the HMAC on a delivery Jabee posted to n8n. Two credentials
- * would have meant setting the same account up twice to use one product,
- * so they share one, and the secret is optional for anybody who never
- * adds the trigger.
+ * The key signs every call the Jabee node makes, and the trigger's own
+ * `webhookMethods` register the address with it on activation. The signing
+ * secret field is the fallback for the other way of setting that address,
+ * by hand on the Approvals page: a trigger that registered itself was
+ * handed a fresh secret and keeps it in its own static data, because Jabee
+ * rotates the secret on every address change and has no route that reads
+ * one back. Two credentials would have meant setting the same account up
+ * twice to use one product, so they share one.
  */
 export class JabeeApi implements ICredentialType {
 	name = 'jabeeApi';
@@ -46,7 +48,7 @@ export class JabeeApi implements ICredentialType {
 			default: '',
 			placeholder: 'whsec_...',
 			description:
-				'Shown beside the webhook address in Jabee under Management then Approvals. Only the Jabee Trigger node reads it, to check the signature on each delivery. Leave it empty if you are not using the trigger.',
+				'Only needed when the webhook address was set by hand on the Approvals page: activating the Jabee Trigger registers the address itself and keeps the secret Jabee hands back. Only the trigger reads it, to check the signature on each delivery.',
 		},
 		{
 			displayName: 'Base URL',

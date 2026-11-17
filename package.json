@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-jabee",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Ask a person on WhatsApp before your n8n workflow does something irreversible, and send alerts from any workflow, without owning a WhatsApp number.",
   "license": "MIT",
   "homepage": "https://jabee.ai/docs/n8n/",

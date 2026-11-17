@@ -8,7 +8,7 @@ import { createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { JabeeTrigger } from '../nodes/Jabee/JabeeTrigger.node';
-import { fakeWebhook } from './helpers';
+import { fail, fakeHook, fakeWebhook, ok } from './helpers';
 
 /**
  * The trigger, which is a public URL on somebody's n8n. Everything here
@@ -224,5 +224,267 @@ describe('a credential with no signing secret', () => {
 		await expect(node.webhook.call(fn)).rejects.toThrow(
 			'Add the webhook signing secret to the Jabee credential',
 		);
+	});
+});
+
+/**
+ * Registering the address, which is the half of this node that talks to
+ * Jabee rather than being talked to.
+ *
+ * One address per Jabee account is the whole shape of these: `create`
+ * must not take over somebody else's, `delete` must not take down
+ * somebody else's, and the secret Jabee mints on the way through has to
+ * be kept, because no route ever reads it back.
+ */
+const MY_URL = 'https://n8n.example.com/webhook/jabee';
+const NEW_SECRET = 'whsec_1111111111111111';
+
+/** What `GET /webhook` answers. */
+function address(url: string | null) {
+	return ok({ webhook: { set: url !== null, url } });
+}
+
+describe('checkExists', () => {
+	it('is true when Jabee points here and a secret is held', async () => {
+		const { fn, calls } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address(MY_URL)],
+			staticData: { webhookSecret: SECRET },
+		});
+
+		expect(await node.webhookMethods.default.checkExists.call(fn)).toBe(true);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]![1]).toMatchObject({ method: 'GET', url: 'https://api.jabee.ai/api/v1/webhook' });
+	});
+
+	it('is true when the secret was pasted on the credential instead', async () => {
+		const { fn } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address(MY_URL)],
+			credentials: { apiKey: 'jak_test', webhookSecret: SECRET },
+		});
+
+		expect(await node.webhookMethods.default.checkExists.call(fn)).toBe(true);
+	});
+
+	/**
+	 * Otherwise activation looks finished and every delivery is refused
+	 * 401, which reads as Jabee being broken.
+	 */
+	it('is false when Jabee points here but no secret is held anywhere', async () => {
+		const { fn } = fakeHook({ webhookUrl: MY_URL, responses: [address(MY_URL)] });
+
+		expect(await node.webhookMethods.default.checkExists.call(fn)).toBe(false);
+	});
+
+	it('is false when Jabee points somewhere else', async () => {
+		const { fn } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address('https://someone-else.example.com/hook')],
+			staticData: { webhookSecret: SECRET },
+		});
+
+		expect(await node.webhookMethods.default.checkExists.call(fn)).toBe(false);
+	});
+
+	it('is false when no address is set at all', async () => {
+		const { fn } = fakeHook({ webhookUrl: MY_URL, responses: [address(null)] });
+
+		expect(await node.webhookMethods.default.checkExists.call(fn)).toBe(false);
+	});
+
+	it('is false, without a call, when n8n has no URL for this trigger yet', async () => {
+		const { fn, calls } = fakeHook({ webhookUrl: undefined, responses: [] });
+
+		expect(await node.webhookMethods.default.checkExists.call(fn)).toBe(false);
+		expect(calls).toHaveLength(0);
+	});
+});
+
+describe('create', () => {
+	it('registers this URL and keeps the secret Jabee mints', async () => {
+		const { fn, calls, staticData } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [
+				address(null),
+				ok({ webhook: { set: true, url: MY_URL }, secret: NEW_SECRET, change: 'set' }),
+			],
+		});
+
+		expect(await node.webhookMethods.default.create.call(fn)).toBe(true);
+		expect(calls[1]![1]).toMatchObject({
+			method: 'PUT',
+			url: 'https://api.jabee.ai/api/v1/webhook',
+			body: { url: MY_URL },
+		});
+		expect(staticData.webhookSecret).toBe(NEW_SECRET);
+	});
+
+	/**
+	 * The reason this node refuses something n8n's lifecycle would do
+	 * happily. Taking the address over would stop the deliveries whatever
+	 * was there depends on, and a failed activation is the lesser harm.
+	 */
+	it('refuses to take over an address somebody else set', async () => {
+		const { fn, calls, staticData } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address('https://api.someone-else.example.com/very/secret/path')],
+		});
+
+		await expect(node.webhookMethods.default.create.call(fn)).rejects.toThrow(
+			'Jabee already posts to api.someone-else.example.com',
+		);
+		expect(calls).toHaveLength(1);
+		expect(staticData.webhookSecret).toBeUndefined();
+	});
+
+	it('names the host of the address it refused, never the path', async () => {
+		const { fn } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address('https://api.someone-else.example.com/very/secret/path')],
+		});
+
+		await expect(node.webhookMethods.default.create.call(fn)).rejects.not.toThrow(
+			'very/secret/path',
+		);
+	});
+
+	/**
+	 * The same URL with no secret held: `checkExists` said no, and
+	 * writing it again is how the secret is obtained.
+	 */
+	it('re-registers the same URL to get a secret it does not have', async () => {
+		const { fn, calls, staticData } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [
+				address(MY_URL),
+				ok({ webhook: { set: true, url: MY_URL }, secret: NEW_SECRET, change: 'replaced' }),
+			],
+		});
+
+		expect(await node.webhookMethods.default.create.call(fn)).toBe(true);
+		expect(calls).toHaveLength(2);
+		expect(staticData.webhookSecret).toBe(NEW_SECRET);
+	});
+
+	it("reads Jabee's refusal out loud when the address is rejected", async () => {
+		const { fn } = fakeHook({
+			webhookUrl: 'http://n8n.example.com/webhook/jabee',
+			responses: [
+				address(null),
+				fail(400, {
+					error: 'invalid_url',
+					field: 'url',
+					detail: 'That address cannot be used: protocol http: is not allowed, use https.',
+				}),
+			],
+		});
+
+		await expect(node.webhookMethods.default.create.call(fn)).rejects.toThrow(
+			'invalid_url: That address cannot be used',
+		);
+	});
+
+	it('says what to do when n8n has no URL for this trigger', async () => {
+		const { fn, calls } = fakeHook({ webhookUrl: undefined, responses: [] });
+
+		await expect(node.webhookMethods.default.create.call(fn)).rejects.toThrow(
+			'This trigger has no webhook URL yet',
+		);
+		expect(calls).toHaveLength(0);
+	});
+});
+
+describe('delete', () => {
+	it("removes the address when it is this workflow's", async () => {
+		const { fn, calls, staticData } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address(MY_URL), ok({ webhook: { set: false, url: null }, change: 'removed' })],
+			staticData: { webhookSecret: SECRET },
+		});
+
+		expect(await node.webhookMethods.default.delete.call(fn)).toBe(true);
+		expect(calls[1]![1]).toMatchObject({
+			method: 'DELETE',
+			url: 'https://api.jabee.ai/api/v1/webhook',
+		});
+		expect(staticData.webhookSecret).toBeUndefined();
+	});
+
+	it("leaves somebody else's address alone, and says so in the log", async () => {
+		const { fn, calls, staticData, warnings } = fakeHook({
+			webhookUrl: MY_URL,
+			responses: [address('https://someone-else.example.com/hook')],
+			staticData: { webhookSecret: SECRET },
+		});
+
+		expect(await node.webhookMethods.default.delete.call(fn)).toBe(true);
+		expect(calls).toHaveLength(1);
+		expect(warnings[0]).toContain('someone-else.example.com');
+		expect(staticData.webhookSecret).toBeUndefined();
+	});
+
+	it('is content when there is no address to remove', async () => {
+		const { fn, calls } = fakeHook({ webhookUrl: MY_URL, responses: [address(null)] });
+
+		expect(await node.webhookMethods.default.delete.call(fn)).toBe(true);
+		expect(calls).toHaveLength(1);
+	});
+});
+
+describe('which secret a delivery is checked against', () => {
+	it('uses the one create was handed, with nothing on the credential', async () => {
+		const { raw, header } = delivery(answered, NEW_SECRET);
+		const { fn, response } = fakeWebhook({
+			params: { events: ['approval.answered'], options: {} },
+			body: answered,
+			rawBody: raw,
+			headers: { 'x-jabee-signature': header },
+			credentials: { webhookSecret: '' },
+			staticData: { webhookSecret: NEW_SECRET },
+		});
+
+		const result = await node.webhook.call(fn);
+
+		expect(response.status).toBeNull();
+		expect(result.workflowData).toBeDefined();
+	});
+
+	/**
+	 * Both can be legitimate: one came from registering, the other was
+	 * pasted after setting the address on the dashboard. Which is live is
+	 * not knowable from inside the trigger.
+	 */
+	it('falls back to the credential when the registered one is stale', async () => {
+		const { raw, header } = delivery(answered, SECRET);
+		const { fn, response } = fakeWebhook({
+			params: { events: ['approval.answered'], options: {} },
+			body: answered,
+			rawBody: raw,
+			headers: { 'x-jabee-signature': header },
+			credentials: { webhookSecret: SECRET },
+			staticData: { webhookSecret: 'whsec_nolongerthelivesecret' },
+		});
+
+		const result = await node.webhook.call(fn);
+
+		expect(response.status).toBeNull();
+		expect(result.workflowData).toBeDefined();
+	});
+
+	it('still refuses a delivery that matches neither', async () => {
+		const { raw, header } = delivery(answered, 'whsec_somebodyelsesentthis');
+		const { fn, response } = fakeWebhook({
+			params: { events: ['approval.answered'], options: {} },
+			body: answered,
+			rawBody: raw,
+			headers: { 'x-jabee-signature': header },
+			credentials: { webhookSecret: SECRET },
+			staticData: { webhookSecret: NEW_SECRET },
+		});
+
+		await node.webhook.call(fn);
+
+		expect(response.status).toBe(401);
 	});
 });

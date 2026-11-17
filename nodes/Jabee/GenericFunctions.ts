@@ -1,6 +1,7 @@
 import type {
 	IDataObject,
 	IExecuteFunctions,
+	IHookFunctions,
 	IHttpRequestMethods,
 	IHttpRequestOptions,
 	ILoadOptionsFunctions,
@@ -19,8 +20,12 @@ export const timing = {
 	now: (): number => Date.now(),
 };
 
-/** Whatever the Jabee context is: both nodes and the credential test. */
-export type JabeeContext = IExecuteFunctions | ILoadOptionsFunctions;
+/**
+ * Whatever the Jabee context is: both nodes, the credential test, and the
+ * trigger's own `webhookMethods`, which register the webhook address over
+ * the same transport on activation.
+ */
+export type JabeeContext = IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions;
 
 export interface JabeeResponse {
 	statusCode: number;
@@ -33,10 +38,23 @@ export interface JabeeResponse {
  *
  * The limit is 60 calls a minute per key. A workflow fed a list of items
  * reaches it on its own, and the fix is one short wait rather than a
- * failed execution -- but a second limit, the 200-a-day one, cannot be
- * waited out inside an execution, so only one of the two 429s is retried.
+ * failed execution.
  */
 const RATE_LIMIT_RETRIES = 2;
+
+/**
+ * The 429s that waiting cannot clear, so they are thrown at once.
+ *
+ * Jabee answers 429 for four different things and only the per-minute one
+ * is worth a pause. A day, an hour and a count of checks are all longer
+ * than an execution should sit there sleeping, and the sentence that comes
+ * back names the fix.
+ */
+const UNWAITABLE_429 = new Set([
+	'daily_limit_reached',
+	'webhook_limit_reached',
+	'heartbeat_limit_reached',
+]);
 
 /** Clamp on `Retry-After`, in seconds, so a bad header cannot park a workflow. */
 const MIN_RETRY_AFTER = 1;
@@ -91,7 +109,7 @@ export async function jabeeApiRequestRaw(
 		const payload = (response.body ?? {}) as JabeeErrorBody;
 		const retryable =
 			response.statusCode === 429 &&
-			payload.error !== 'daily_limit_reached' &&
+			!UNWAITABLE_429.has(payload.error ?? '') &&
 			attempt < RATE_LIMIT_RETRIES;
 
 		if (!retryable) return response;
@@ -148,6 +166,7 @@ export async function jabeeApiRequest(
  */
 const FALLBACK_DETAIL: Record<string, string> = {
 	unauthorised: 'That API key is not valid or was revoked. Make a new one under Management then Approvals.',
+	webhook_failed: 'Jabee could not read or change the webhook address. Try activating again.',
 	not_found:
 		'No request of that kind has that ID on this account. An alert ID is not found under approvals, and the other way round.',
 	allowance_used_up:

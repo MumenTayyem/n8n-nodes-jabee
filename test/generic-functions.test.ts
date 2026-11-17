@@ -165,6 +165,28 @@ describe('the two rate limits', () => {
 		expect(slept).toEqual([]);
 	});
 
+	/**
+	 * Jabee answers 429 for four things and only the per-minute one is
+	 * worth a pause. The webhook limit is ten changes an hour and the
+	 * heartbeat one is a count of checks: sleeping on either would hold an
+	 * execution open and still fail.
+	 */
+	it.each([['webhook_limit_reached'], ['heartbeat_limit_reached']])(
+		'never retries %s, which an execution cannot wait out',
+		async (error) => {
+			const { fn, calls } = fakeExecute({
+				params: {},
+				responses: [fail(429, { error, detail: 'A sentence naming the fix.' }, { 'retry-after': '900' })],
+			});
+
+			await expect(jabeeApiRequest.call(fn, 'PUT', '/webhook', { url: 'https://x.test/h' })).rejects.toThrow(
+				error,
+			);
+			expect(calls).toHaveLength(1);
+			expect(slept).toEqual([]);
+		},
+	);
+
 	it('clamps a Retry-After it cannot trust', () => {
 		expect(retryAfterMs('5')).toBe(5_000);
 		expect(retryAfterMs(undefined)).toBe(2_000);

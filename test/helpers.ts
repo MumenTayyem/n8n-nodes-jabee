@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import type {
 	IDataObject,
 	IExecuteFunctions,
+	IHookFunctions,
 	INode,
 	INodeExecutionData,
 	IWebhookFunctions,
@@ -111,6 +112,8 @@ export interface FakeWebhookOptions {
 	rawBody?: Buffer | string;
 	headers?: Record<string, string | string[] | undefined>;
 	credentials?: IDataObject;
+	/** What `create` left behind on a previous activation. */
+	staticData?: IDataObject;
 }
 
 export interface FakeWebhook {
@@ -118,6 +121,8 @@ export interface FakeWebhook {
 	/** What was written to the HTTP response, when anything was. */
 	response: { status: number | null; sent: unknown };
 	warnings: string[];
+	/** The node's static data, read back after the call. */
+	staticData: IDataObject;
 }
 
 export function fakeWebhook(options: FakeWebhookOptions): FakeWebhook {
@@ -140,9 +145,12 @@ export function fakeWebhook(options: FakeWebhookOptions): FakeWebhook {
 		},
 	};
 
+	const staticData: IDataObject = { ...(options.staticData ?? {}) };
+
 	const fn = {
 		getNode: () => ({ ...NODE, type: 'n8n-nodes-jabee.jabeeTrigger' }),
 		getCredentials: async () => options.credentials ?? { webhookSecret: '' },
+		getWorkflowStaticData: () => staticData,
 		getNodeParameter: (name: string, fallback?: unknown) => {
 			if (name in options.params) return options.params[name];
 			if (fallback !== undefined) return fallback;
@@ -164,5 +172,68 @@ export function fakeWebhook(options: FakeWebhookOptions): FakeWebhook {
 		},
 	} as unknown as IWebhookFunctions;
 
-	return { fn, response, warnings };
+	return { fn, response, warnings, staticData };
+}
+
+export interface FakeHookOptions {
+	/** The Production URL n8n would hand the node, or nothing at all. */
+	webhookUrl?: string | undefined;
+	responses: FakeHttpResponse[];
+	credentials?: IDataObject;
+	staticData?: IDataObject;
+}
+
+export interface FakeHook {
+	fn: IHookFunctions;
+	/** Every call made, as `[credentialType, requestOptions]`. */
+	calls: Array<[string, Record<string, unknown>]>;
+	/** The node's static data, which is where a registered secret lives. */
+	staticData: IDataObject;
+	warnings: string[];
+}
+
+/**
+ * Enough of n8n to run `checkExists`, `create` and `delete`.
+ *
+ * The same shape as `fakeExecute`: a queue of HTTP answers, every request
+ * recorded, and nothing mocked that the methods do not touch. `staticData`
+ * is a real object held across the calls, because what `create` writes
+ * into it is what `webhook()` later verifies with.
+ */
+export function fakeHook(options: FakeHookOptions): FakeHook {
+	const calls: Array<[string, Record<string, unknown>]> = [];
+	const queue = [...options.responses];
+	const staticData: IDataObject = { ...(options.staticData ?? {}) };
+	const warnings: string[] = [];
+
+	const httpRequestWithAuthentication = vi.fn(
+		async (credentialType: string, requestOptions: Record<string, unknown>) => {
+			calls.push([credentialType, requestOptions]);
+			const next = queue.shift();
+			if (!next) {
+				throw new Error(
+					`the node made more HTTP calls than the test queued: ${String(requestOptions.method)} ${String(requestOptions.url)}`,
+				);
+			}
+			return { statusCode: next.statusCode, headers: next.headers ?? {}, body: next.body ?? {} };
+		},
+	);
+
+	const fn = {
+		getNode: () => ({ ...NODE, type: 'n8n-nodes-jabee.jabeeTrigger' }),
+		getNodeWebhookUrl: () =>
+			'webhookUrl' in options ? options.webhookUrl : 'https://n8n.example.com/webhook/jabee',
+		getCredentials: async () =>
+			options.credentials ?? { apiKey: 'jak_test', baseUrl: 'https://api.jabee.ai/api/v1' },
+		getWorkflowStaticData: () => staticData,
+		logger: {
+			warn: (message: string) => warnings.push(message),
+			info: vi.fn(),
+			debug: vi.fn(),
+			error: vi.fn(),
+		},
+		helpers: { httpRequestWithAuthentication },
+	} as unknown as IHookFunctions;
+
+	return { fn, calls, staticData, warnings };
 }

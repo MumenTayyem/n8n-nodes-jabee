@@ -29,8 +29,8 @@ One credential, `Jabee API`, used by both nodes.
 
 | Field | Where it comes from |
 |---|---|
-| **API Key** | app.jabee.ai → Management → Approvals → create a key. Begins `jak_`, shown once. |
-| **Webhook Signing Secret** | Beside the webhook address on the same page. Begins `whsec_`. Only the trigger reads it; leave it empty if you are not using the trigger. |
+| **API Key** | app.jabee.ai → Management → Approvals → Setup → create a key. Begins `jak_`, shown once. |
+| **Webhook Signing Secret** | Only needed if you set the webhook address by hand. Activating the trigger registers the address and keeps the secret itself. Begins `whsec_`. |
 | **Base URL** | `https://api.jabee.ai/api/v1`. Change it only to point at another Jabee deployment. |
 
 Before anything can be delivered, whoever is going to be messaged needs a
@@ -119,21 +119,36 @@ name cannot silently re-time somebody else's.
 
 ## Jabee Trigger node
 
-Jabee's webhook address is one setting on the account, so **this trigger
-cannot register itself** — there is no API for it, by design: a `jak_` key
-that could repoint where answers are delivered would be worth far more to
-somebody who stole it than the messages it can send.
+**Activate the workflow and it registers itself.** The trigger calls
+`GET`, `PUT` and `DELETE /webhook` with the same key, so there is nothing to
+paste: activating sets the address, deactivating removes it, and the secret
+Jabee hands back is kept in the node.
 
-1. Activate the workflow and copy the **Production URL**.
-2. Paste it into app.jabee.ai → Management → Approvals, as the webhook
-   address.
-3. Copy the `whsec_` secret shown there into **Webhook Signing Secret** on
-   the credential.
+Jabee allows **one webhook address per account**, which shapes two refusals
+worth knowing about before you activate anything:
 
-Without that secret the node refuses to run and says so. Every delivery is
-verified: `X-Jabee-Signature: t=<unix>,v1=<hex>` is the HMAC-SHA256 of
-`<t>.<raw body>`, checked over the raw bytes, compared in constant time, and
-refused if the timestamp is more than five minutes from this machine's clock.
+- If a *different* address is already set, activation fails and says which
+  host it found. Nothing is changed. Remove that address under
+  app.jabee.ai → Management → Approvals → Setup — or send
+  `DELETE /api/v1/webhook` with the same key — and activate again.
+- Deactivating only removes the address when it is this workflow's URL, so
+  taking one workflow down never takes down an endpoint it did not register.
+
+**Every change replaces the account's signing secret**, and the verified
+handset is messaged to say which host the webhook moved to. That is the
+point: a key that can repoint deliveries must never be able to do it
+quietly. It also means anything that was listening on the old address stops
+verifying rather than going silent.
+
+If you would rather set the address by hand on the Approvals page, that
+still works: paste the `whsec_` secret shown there into **Webhook Signing
+Secret** on the credential. The node tries both secrets, so either way of
+setting it up verifies.
+
+Every delivery is verified: `X-Jabee-Signature: t=<unix>,v1=<hex>` is the
+HMAC-SHA256 of `<t>.<raw body>`, checked over the raw bytes, compared in
+constant time, and refused if the timestamp is more than five minutes from
+this machine's clock.
 
 Events: `approval.answered`, `approval.expired`, `approval.failed`,
 `message.received`, `approval.test`. Every event for the whole account
