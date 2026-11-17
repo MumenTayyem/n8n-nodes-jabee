@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Jabee">
+  <title>Jabee</title>
+  <!--
+    The dark-theme variant: the same artwork on a lighter green ground.
+
+    n8n asks for both variants rather than one file, and the reason shows
+    up on the node panel: #1f5f43 is nearly the same value as n8n's dark
+    canvas, so the tile loses its edge and the mark reads as a floating
+    speech bubble. This ground is light enough to keep the tile.
+  -->
+  <rect width="64" height="64" rx="14" fill="#2f8a62"/>
+  <path fill="#fbfbf9"
+        d="M13 12h22a8 8 0 0 1 8 8v16a8 8 0 0 1-8 8H23l-10 9v-9a8 8 0 0 1-8-8V20a8 8 0 0 1 8-8z"/>
+  <circle cx="52" cy="28" r="8" fill="#f2c14a"/>
+</svg>

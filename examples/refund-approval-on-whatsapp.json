@@ -1,0 +1,283 @@
+{
+  "name": "Refunds over the limit wait for a tap on WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this does\n\nA refund request arrives on the webhook. Anything under the limit is refunded straight away. Anything over it stops here until a person taps **Approve** on WhatsApp, and only then does the money move.\n\nThe approval is the point: a refund cannot be taken back, and the person who can judge it is usually not at a desk.\n\n## Before you run it\n\n1. **Jabee credential** — API key from Management then Approvals at app.jabee.ai. Whoever will be asked verifies their phone on the Alerts page, under *Where alerts go*.\n2. **Header Auth credential** for Stripe — `Authorization` / `Bearer sk_live_...`. Or replace both HTTP Request nodes with whatever your irreversible step actually is.\n3. **Set the limit** in *Needs a person?* — it is 50000, which is 500.00 in Stripe's minor units.\n\n## The two things worth copying\n\n**External ID.** It is set to `refund-<payment intent>`, so a rerun of this workflow, or a retry on the error branch, returns the request already made instead of asking somebody twice about the same refund.\n\n**Report Outcome.** Jabee knows the tap; only this workflow knows whether the refund actually went through. Reporting it back is what makes the history true a month later.\n\n## If the answer may take hours\n\n*Wait for the Answer* holds the execution open while it polls, capped here at 15 minutes. For a decision that can sit overnight, drop it to off and act on the answer in a second workflow started by the **Jabee Trigger** node — see `approval-answered-trigger.json` beside this file.",
+        "height": 820,
+        "width": 420
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000001",
+      "name": "Read me first",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-520, -60]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "refund-requested",
+        "options": {}
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000002",
+      "name": "Refund requested",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [-40, 180],
+      "webhookId": "0a1b2c3d-0000-4000-8000-000000000002"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "amount-over-limit",
+              "leftValue": "={{ $json.body.amount }}",
+              "rightValue": 50000,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000003",
+      "name": "Needs a person?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [200, 180]
+    },
+    {
+      "parameters": {
+        "resource": "approval",
+        "operation": "request",
+        "title": "=Refund {{ ($json.body.amount / 100).toFixed(2) }} {{ $json.body.currency.toUpperCase() }} to {{ $json.body.customer_email }}",
+        "body": "=Reason given: {{ $json.body.reason }}\nPayment: {{ $json.body.payment_intent }}\n\nApprove and the refund goes out now. Skip and nothing happens.",
+        "options": ["approve", "skip"],
+        "wait": true,
+        "waitTimeout": 900,
+        "additionalFields": {
+          "external_id": "=refund-{{ $json.body.payment_intent }}",
+          "url": "=https://dashboard.stripe.com/payments/{{ $json.body.payment_intent }}",
+          "expires_in_minutes": 1440,
+          "metadata": "={{ JSON.stringify({ payment_intent: $json.body.payment_intent, n8n_execution: $execution.id }) }}"
+        }
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000004",
+      "name": "Ask before refunding",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [440, 80]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "status-approved",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000005",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [680, 80]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.stripe.com/v1/refunds",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "payment_intent",
+              "value": "={{ $('Refund requested').item.json.body.payment_intent }}"
+            },
+            {
+              "name": "amount",
+              "value": "={{ $('Refund requested').item.json.body.amount }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000006",
+      "name": "Issue the refund",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, -20]
+    },
+    {
+      "parameters": {
+        "resource": "approval",
+        "operation": "reportOutcome",
+        "approvalId": "={{ $('Ask before refunding').item.json.id }}",
+        "outcome": "refunded",
+        "note": "=Stripe refund {{ $json.id }}"
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000007",
+      "name": "Record that it went out",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [1160, -20]
+    },
+    {
+      "parameters": {
+        "resource": "approval",
+        "operation": "reportOutcome",
+        "approvalId": "={{ $json.id }}",
+        "outcome": "not_refunded",
+        "note": "=Answered {{ $json.status }}{{ $json.response_text ? ': ' + $json.response_text : '' }}"
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000008",
+      "name": "Record that it did not",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [920, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.stripe.com/v1/refunds",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "payment_intent",
+              "value": "={{ $json.body.payment_intent }}"
+            },
+            {
+              "name": "amount",
+              "value": "={{ $json.body.amount }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0a1b2c3d-0000-4000-8000-000000000009",
+      "name": "Refund without asking",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 380]
+    },
+    {
+      "parameters": {
+        "content": "### Why two refund nodes\n\nThe small ones never reach a phone. Asking about every refund is how people learn to tap Approve without reading, which is worse than not asking at all.\n\n500 a month are included in the plan, so the limit is also what keeps the bill where you put it.",
+        "height": 220,
+        "width": 340
+      },
+      "id": "0a1b2c3d-0000-4000-8000-00000000000a",
+      "name": "Why two refund nodes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [800, 400]
+    }
+  ],
+  "connections": {
+    "Refund requested": {
+      "main": [
+        [
+          {
+            "node": "Needs a person?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs a person?": {
+      "main": [
+        [
+          {
+            "node": "Ask before refunding",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Refund without asking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask before refunding": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Issue the refund",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record that it did not",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Issue the refund": {
+      "main": [
+        [
+          {
+            "node": "Record that it went out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

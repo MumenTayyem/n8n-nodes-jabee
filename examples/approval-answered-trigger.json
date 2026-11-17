@@ -1,0 +1,151 @@
+{
+  "name": "Act when the answer arrives, however long it takes",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this does\n\nThe other half of `refund-approval-on-whatsapp.json`. Nothing here asks anybody anything: this workflow wakes up when Jabee delivers an answer, which may be four hours after the question went out, and no n8n execution was held open in the meantime.\n\nUse this shape rather than *Wait for the Answer* whenever the decision can reasonably sit until the morning.\n\n## Setting it up\n\n1. **Activate this workflow**, then copy the **Production URL** from the Jabee Trigger node.\n2. Paste it into the Jabee dashboard, **Management → Approvals**, as the webhook address.\n3. Copy the `whsec_` secret it shows you into **Webhook Signing Secret** on the Jabee credential. Without it the trigger refuses every delivery with a 401, on purpose: this URL is public.\n\n## One address, every event\n\nJabee posts every event for the whole account to that one address, so this is the only place it can arrive. The node answers the events it was not asked for with a 200 and drops them — refusing them would put Jabee's eleven-hour retry ladder behind messages nobody wanted.\n\n## Finding out what it was about\n\n`approval.metadata` comes back exactly as it was sent, which is where the asking workflow put the payment intent. `approval.external_id` works too.\n\nThat also matters because every answer on the account arrives here, not just this one's. If more than one workflow asks for approvals, add a condition on `approval.metadata` to the IF below and send the rest down the other branch.\n\n`id` at the top level is the delivery ID: Jabee delivers at least once, so dedupe on it if the step below is not safe to repeat.",
+        "height": 760,
+        "width": 420
+      },
+      "id": "1b2c3d4e-0000-4000-8000-000000000001",
+      "name": "Read me first",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-520, -40]
+    },
+    {
+      "parameters": {
+        "events": ["approval.answered"],
+        "options": {}
+      },
+      "id": "1b2c3d4e-0000-4000-8000-000000000002",
+      "name": "Somebody answered on WhatsApp",
+      "type": "n8n-nodes-jabee.jabeeTrigger",
+      "typeVersion": 1,
+      "position": [-40, 200],
+      "webhookId": "1b2c3d4e-0000-4000-8000-000000000002"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "status-approved",
+              "leftValue": "={{ $json.approval.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1b2c3d4e-0000-4000-8000-000000000003",
+      "name": "An approved refund?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [220, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.stripe.com/v1/refunds",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "payment_intent",
+              "value": "={{ $json.approval.metadata.payment_intent }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1b2c3d4e-0000-4000-8000-000000000004",
+      "name": "Issue the refund",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 100]
+    },
+    {
+      "parameters": {
+        "resource": "approval",
+        "operation": "reportOutcome",
+        "approvalId": "={{ $('Somebody answered on WhatsApp').item.json.approval.id }}",
+        "outcome": "refunded",
+        "note": "=Stripe refund {{ $json.id }}"
+      },
+      "id": "1b2c3d4e-0000-4000-8000-000000000005",
+      "name": "Record that it went out",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [740, 100]
+    },
+    {
+      "parameters": {},
+      "id": "1b2c3d4e-0000-4000-8000-000000000006",
+      "name": "Nothing to do",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [480, 320]
+    }
+  ],
+  "connections": {
+    "Somebody answered on WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "An approved refund?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "An approved refund?": {
+      "main": [
+        [
+          {
+            "node": "Issue the refund",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing to do",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Issue the refund": {
+      "main": [
+        [
+          {
+            "node": "Record that it went out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
