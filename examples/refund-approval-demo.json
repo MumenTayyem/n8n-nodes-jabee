@@ -1,0 +1,368 @@
+{
+  "name": "Refunds over the limit wait for a tap on WhatsApp",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "demo-0000-0000-4000-8000-00000000000",
+      "name": "When clicking 'Execute workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "amount",
+              "value": 900,
+              "type": "number"
+            },
+            {
+              "id": "a2",
+              "name": "currency",
+              "value": "AED",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "customer_email",
+              "value": "sara@example.com",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "reason",
+              "value": "Item never arrived",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "payment_intent",
+              "value": "pi_demo_1",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "demo-0001-0000-4000-8000-00000000000",
+      "name": "A refund comes in",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.amount }}",
+              "rightValue": 500,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "demo-0002-0000-4000-8000-00000000000",
+      "name": "Over the limit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "approval",
+        "operation": "request",
+        "title": "=Refund {{ $json.amount }} {{ $json.currency }} to {{ $json.customer_email }}",
+        "body": "={{ \"Reason: \" + $json.reason + \"\\n\" + \"Payment: \" + $json.payment_intent }}",
+        "options": [
+          "approve",
+          "skip"
+        ],
+        "wait": true,
+        "waitTimeout": 300,
+        "additionalFields": {
+          "external_id": "=refund-{{ $json.payment_intent }}",
+          "expires_in_minutes": 60,
+          "metadata": "={{ JSON.stringify({ payment_intent: $('A refund comes in').item.json.payment_intent }) }}"
+        }
+      },
+      "id": "demo-0003-0000-4000-8000-00000000000",
+      "name": "Ask a person on WhatsApp",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [
+        460,
+        200
+      ],
+      "credentials": {
+        "jabeeApi": {
+          "id": "REPLACE",
+          "name": "Jabee account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "demo-0004-0000-4000-8000-00000000000",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "demo-0005-0000-4000-8000-00000000000",
+      "name": "Issue the refund",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        940,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "approval",
+        "operation": "reportOutcome",
+        "approvalId": "={{ $('Ask a person on WhatsApp').item.json.id }}",
+        "outcome": "refunded",
+        "note": "=Refund issued for {{ $('A refund comes in').item.json.payment_intent }}"
+      },
+      "id": "demo-0006-0000-4000-8000-00000000000",
+      "name": "Tell Jabee what happened",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [
+        1180,
+        100
+      ],
+      "credentials": {
+        "jabeeApi": {
+          "id": "REPLACE",
+          "name": "Jabee account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "alert",
+        "operation": "send",
+        "title": "=Refund issued: {{ $('A refund comes in').item.json.payment_intent }}",
+        "body": "=Approved on WhatsApp and the money has moved.",
+        "additionalFields": {}
+      },
+      "id": "demo-0007-0000-4000-8000-00000000000",
+      "name": "Say it went out",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [
+        1420,
+        100
+      ],
+      "credentials": {
+        "jabeeApi": {
+          "id": "REPLACE",
+          "name": "Jabee account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "alert",
+        "operation": "send",
+        "title": "=Refund stopped: {{ $('A refund comes in').item.json.payment_intent }}",
+        "body": "=Nobody approved it, so nothing was refunded.",
+        "additionalFields": {}
+      },
+      "id": "demo-0008-0000-4000-8000-00000000000",
+      "name": "Say it did not",
+      "type": "n8n-nodes-jabee.jabee",
+      "typeVersion": 1,
+      "position": [
+        940,
+        300
+      ],
+      "credentials": {
+        "jabeeApi": {
+          "id": "REPLACE",
+          "name": "Jabee account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "demo-0009-0000-4000-8000-00000000000",
+      "name": "Refund it without asking",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        460,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## What this shows\n\nA refund arrives. Under the limit it goes straight through. Over it, **Jabee asks a person on WhatsApp** and the workflow waits for the tap.\n\nApprove and the refund is issued, the outcome is reported back to Jabee, and an alert says it went out. Skip and an alert says it did not.\n\n**Setup:** one Jabee credential (an API key from Management → Approvals at app.jabee.ai) and a verified phone. Nothing else — the two grey nodes stand in for whatever your irreversible step really is.",
+        "height": 320,
+        "width": 420
+      },
+      "id": "demo-sticky-0000-4000-8000-000000009",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -680,
+        160
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "A refund comes in",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A refund comes in": {
+      "main": [
+        [
+          {
+            "node": "Over the limit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Over the limit?": {
+      "main": [
+        [
+          {
+            "node": "Ask a person on WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Refund it without asking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask a person on WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Issue the refund",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Say it did not",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Issue the refund": {
+      "main": [
+        [
+          {
+            "node": "Tell Jabee what happened",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tell Jabee what happened": {
+      "main": [
+        [
+          {
+            "node": "Say it went out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "demo"
+  }
+}
